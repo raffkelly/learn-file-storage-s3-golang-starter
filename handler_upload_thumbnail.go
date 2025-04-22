@@ -1,10 +1,17 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/raffkelly/learn-file-storage-s3-golang-starter/internal/auth"
@@ -42,11 +49,12 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 	contentType := header.Header.Get("Content-Type")
-	fileData, err := io.ReadAll(file)
-	if err != nil {
-		respondWithError(w, 500, "unable to read file data", nil)
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if mediaType != "image/jpeg" && mediaType != "image/png" {
+		respondWithError(w, 400, "invalid media type for thumbnail", err)
 		return
 	}
+
 	videoData, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, 500, "unable to retrieve video from db", nil)
@@ -56,15 +64,34 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "user not authorized to get video data", errors.New("unauthorized user"))
 		return
 	}
-	thumb := thumbnail{
-		data:      fileData,
-		mediaType: contentType,
+	contentTypeString := strings.Split(contentType, "/")[1]
+	fileExtension := "." + strings.Split(contentTypeString, ";")[0]
+	bytePath := make([]byte, 32)
+	_, _ = rand.Read(bytePath)
+	urlString := base64.RawURLEncoding.EncodeToString(bytePath)
+	filePath := filepath.Join(cfg.assetsRoot, urlString+fileExtension)
+	thumbFile, err := os.Create(filePath)
+	if err != nil {
+		respondWithError(w, 500, "error creating thumbnail file", err)
+		return
 	}
-	videoThumbnails[videoID] = thumb
-	newVideo := database.Video{}
+	_, err = io.Copy(thumbFile, file)
+	if err != nil {
+		respondWithError(w, 500, "error copying data into thumbnail file", err)
+		return
+	}
+
+	dataURL := "http://localhost:8091/assets/" + urlString + fileExtension
+
+	newVideo := database.Video{
+		ID:                videoData.ID,
+		CreatedAt:         videoData.CreatedAt,
+		UpdatedAt:         time.Now(),
+		ThumbnailURL:      &dataURL,
+		VideoURL:          videoData.VideoURL,
+		CreateVideoParams: videoData.CreateVideoParams,
+	}
 	cfg.db.UpdateVideo(newVideo)
 
-	// TODO: implement the upload here
-
-	respondWithJSON(w, http.StatusOK, struct{}{})
+	respondWithJSON(w, http.StatusOK, newVideo)
 }
